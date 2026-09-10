@@ -520,7 +520,16 @@ def validate_pre_merge_receipts(repo_root, head_sha, pr_num=None):
                 if not isinstance(entry, dict):
                     continue
                 c_val = str(entry.get("commit") or "").lower()
-                commit_match = bool(c_val and (c_val == head_sha.lower() or c_val in recent_shas_lower))
+                c_len = len(c_val)
+                commit_match = bool(
+                    c_val
+                    and (
+                        (c_len >= 7 and head_sha.lower().startswith(c_val))
+                        or c_val == head_sha.lower()
+                        or (c_len >= 7 and any(s.startswith(c_val) for s in recent_shas_lower))
+                        or any(s == c_val for s in recent_shas_lower)
+                    )
+                )
                 pr_match = False
                 if expected_pr:
                     pr_val = str(entry.get("pr") or entry.get("pr_number") or "")
