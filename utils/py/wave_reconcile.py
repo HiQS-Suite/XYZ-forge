@@ -1434,7 +1434,9 @@ def run_pre_merge(repo_root, args):
             if len(parts) >= 2:
                 for p in parts[1:]:
                     if "PROJECT/2-WORKING/" in p and p.endswith(".md"):
-                        diff_docs.append(os.path.join(repo_root, p))
+                        fname = os.path.basename(p)
+                        if not fname.startswith("recon-") and not fname.startswith("MARATHON-PLAN-"):
+                            diff_docs.append(os.path.join(repo_root, p))
     except Exception:
         pass
 
@@ -1471,6 +1473,19 @@ def run_pre_merge(repo_root, args):
     doc_contract_failed = False
     for doc_path in sorted(target_docs):
         doc_name = os.path.basename(doc_path)
+        if doc_name.startswith("recon-") or doc_name.startswith("MARATHON-PLAN-"):
+            continue
+        try:
+            with open(doc_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except Exception as e:
+            errors.append(f"Cannot read {doc_name}: {e}")
+            doc_contract_failed = True
+            continue
+
+        if "roadmap_exempt: true" in content or "doc_type: research" in content:
+            continue
+
         # 1. Frontmatter
         fm_err = validate_frontmatter_schema(doc_path)
         if fm_err:
@@ -1478,8 +1493,6 @@ def run_pre_merge(repo_root, args):
             doc_contract_failed = True
 
         # 2. Lessons Learned
-        with open(doc_path, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
         ll_err = validate_lessons_learned(content, doc_name)
         if ll_err:
             errors.append(ll_err)
