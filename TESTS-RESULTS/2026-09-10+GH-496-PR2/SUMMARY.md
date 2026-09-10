@@ -1,7 +1,7 @@
 # GH-496 PR 2 — Gate Provenance & Test Results Summary
 
 Branch: `feat/gh496-phase2-views`
-Target Commit: `cb06de33`
+Target Commit: `1ecee672`
 Qualification Environment: Disposable full clone `~/marathon-clones/xyz-gh496-gate-pr2` (un-sandboxed, independent `.git`)
 Gate: `./validate.sh` (368+ parallel test suites + pytest layer + clone invariants)
 
