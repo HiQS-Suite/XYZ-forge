@@ -3596,6 +3596,19 @@ def cmd_settings_list(args):
         conn.close()
 
 
+def cmd_settings_get(args):
+    """Print one setting value."""
+    root = resolve_root(args.root)
+    conn = connect(artifact_paths(root)["db"])
+    try:
+        val = get_setting(conn, args.key, None)
+        if val is None:
+            sys.exit(1)
+        print(val)
+    finally:
+        conn.close()
+
+
 def validate_roadmap_section(section):
     """Refuse headings the dashboard cannot render; never silently rename input."""
     if section not in ROADMAP_SECTIONS:
@@ -5540,6 +5553,8 @@ def build_parser():
     sp_set = sub.add_parser("settings", help="read/write operator-configurable ledger settings")
     ssub = sp_set.add_subparsers(dest="settings_cmd", required=True)
     sp_sl = ssub.add_parser("list", help="print every settings row")
+    sp_sg = ssub.add_parser("get", help="print one setting value")
+    sp_sg.add_argument("key", help="setting key name")
     sp_ss = ssub.add_parser("set", help="write one operator-configurable setting (receipted)")
     sp_ss.add_argument("key", help="setting key; only configurable keys are accepted")
     sp_ss.add_argument("value", help="new value")
@@ -5734,7 +5749,8 @@ def main(argv=None):
                               "move": cmd_roadmap_move, "sections": cmd_roadmap_sections,
                               "reconcile-state": cmd_roadmap_reconcile_state}[a.roadmap_cmd](a),
         "settings": lambda a: {"set": cmd_settings_set,
-                               "list": cmd_settings_list}[a.settings_cmd](a),
+                               "list": cmd_settings_list,
+                               "get": cmd_settings_get}[a.settings_cmd](a),
         "dashboard": cmd_dashboard,
         "jog": lambda a: {"add": cmd_jog_add, "list": cmd_jog_list,
                           "bump": cmd_jog_bump, "drop": cmd_jog_drop,

@@ -9,6 +9,7 @@ ROADMAP.md, releases.db SQLite ledger, generated dashboards, and next-wave marat
 import argparse
 import fcntl
 import glob
+import hashlib
 import json
 import os
 import re
@@ -69,6 +70,72 @@ class ReconcilerLock:
                 self.fd.close()
             except OSError:
                 pass
+
+
+def check_hosted_reconciler_in_flight(repo_root, repo_slug=None, force=False):
+    """Refuse local reconciliation if hosted wave-reconcile.yml is running/queued (GH-496)."""
+    cmd = [
+        "gh", "run", "list",
+        "--workflow", "wave-reconcile.yml",
+        "--json", "databaseId,status,conclusion,createdAt,headSha,event",
+        "--limit", "10",
+    ]
+    if repo_slug:
+        cmd.extend(["--repo", repo_slug])
+
+    try:
+        res = subprocess.run(
+            cmd,
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except FileNotFoundError:
+        if force:
+            log("  WARNING: 'gh' CLI not found; bypassing hosted in-flight check via --force-local-reconcile")
+            return
+        die("Hosted reconciler check failed: 'gh' command not found. Pass --force-local-reconcile to bypass.", code=8)
+    except subprocess.TimeoutExpired:
+        if force:
+            log("  WARNING: 'gh run list' timed out; bypassing hosted in-flight check via --force-local-reconcile")
+            return
+        die("Hosted reconciler check failed: 'gh run list' timed out. Pass --force-local-reconcile to bypass.", code=8)
+    except Exception as e:
+        if force:
+            log(f"  WARNING: gh run list failed ({e}); bypassing hosted in-flight check via --force-local-reconcile")
+            return
+        die(f"Hosted reconciler check failed: {e}. Pass --force-local-reconcile to bypass.", code=8)
+
+    if res.returncode != 0:
+        if force:
+            log(f"  WARNING: gh run list exited {res.returncode}; bypassing hosted in-flight check via --force-local-reconcile")
+            return
+        err = res.stderr.strip() or "unknown error"
+        die(f"Hosted reconciler check failed: unable to query GitHub Actions ({err}). Pass --force-local-reconcile to bypass.", code=8)
+
+    try:
+        runs = json.loads(res.stdout)
+    except ValueError:
+        if force:
+            return
+        die("Hosted reconciler check failed: malformed JSON from gh run list. Pass --force-local-reconcile to bypass.", code=8)
+
+    in_flight = [
+        r for r in runs
+        if r.get("status") in ("queued", "in_progress", "waiting", "requested")
+    ]
+    if in_flight:
+        run_ids = ", ".join(f"#{r.get('databaseId')} ({r.get('status')})" for r in in_flight)
+        if force:
+            log(f"  WARNING: Overriding active hosted reconciliation run(s): {run_ids} via --force-local-reconcile")
+            return
+        die(
+            f"Hosted reconciliation workflow (wave-reconcile.yml) is currently in-flight: {run_ids}. "
+            "Refusing local reconciliation to prevent concurrent landing collisions. "
+            "Wait for hosted workflow to complete, or pass --force-local-reconcile to override.",
+            code=8,
+        )
 
 
 class RollbackJournal:
@@ -399,6 +466,79 @@ def check_provenance_receipts(repo_root, pr_meta):
         "by pr/pr_number or exact merge commit in TESTS-RESULTS/", code=6)
 
 
+def validate_pre_merge_receipts(repo_root, head_sha, pr_num=None):
+    """Ensure a passing test receipt matching HEAD SHA or PR number is COMMITTED in Git tree (GH-496)."""
+    try:
+        tree_files = subprocess.check_output(
+            ["git", "ls-tree", "-r", "--name-only", "HEAD", "TESTS-RESULTS/"],
+            cwd=repo_root,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).splitlines()
+    except Exception:
+        tree_files = []
+
+    matching_receipts = [
+        f for f in tree_files
+        if f.endswith("provenance.jsonl") or f.endswith("error_log.jsonl")
+    ]
+    if not matching_receipts:
+        return f"No committed provenance.jsonl or error_log.jsonl receipts found under TESTS-RESULTS/ at HEAD {head_sha[:10]}."
+
+    try:
+        recent_shas = subprocess.check_output(
+            ["git", "log", "-n", "10", "--format=%H", "HEAD"],
+            cwd=repo_root,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).splitlines()
+    except Exception:
+        recent_shas = [head_sha]
+    recent_shas_lower = set(s.lower() for s in recent_shas)
+
+    found_match = False
+    expected_pr = str(pr_num) if pr_num else None
+    for receipt_rel in matching_receipts:
+        try:
+            content = subprocess.check_output(
+                ["git", "show", f"HEAD:{receipt_rel}"],
+                cwd=repo_root,
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+            for line in content.splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                c_val = str(entry.get("commit") or "").lower()
+                commit_match = bool(c_val and (c_val == head_sha.lower() or c_val in recent_shas_lower))
+                pr_match = False
+                if expected_pr:
+                    pr_val = str(entry.get("pr") or entry.get("pr_number") or "")
+                    if pr_val == expected_pr:
+                        pr_match = True
+                if commit_match or pr_match:
+                    res = entry.get("result") or entry.get("status")
+                    rc = entry.get("rc")
+                    if res in ("pass", "passed", "PASS") or rc == 0:
+                        found_match = True
+                        break
+            if found_match:
+                break
+        except Exception:
+            continue
+
+    if not found_match:
+        target = f"PR #{pr_num}" if pr_num else f"commit {head_sha[:10]}"
+        return f"No committed passing test receipt at HEAD matches {target} in TESTS-RESULTS/ (AGENTS.md: uncommitted provenance is not proof)."
+    return None
+
+
 # GH-271: closing-keyword clause + trailing title tag decide LINKAGE (what a merged PR may
 # complete); bare mentions are references only. The #-or-GH- prefix is mandatory in both —
 # "closes 5 issues" must not extract issue 5 — and keywords must sit on the same line as the
@@ -508,6 +648,82 @@ def parse_doc_frontmatter(doc_path):
         return {}
 
 
+def validate_lessons_learned(content, doc_name):
+    """Assert ## Lessons Learned section exists and contains substantive content (GH-496)."""
+    m = re.search(r"##\s+Lessons\s+Learned.*?(?=\n##\s+(?!#)|\Z)", content, re.IGNORECASE | re.DOTALL)
+    if not m:
+        return f"Doc {doc_name} is missing mandatory '## Lessons Learned (For Future Agents)' section."
+
+    section_text = m.group(0)
+    lines = section_text.splitlines()
+    body_lines = lines[1:]
+
+    # Strip HTML comments
+    clean_body = re.sub(r"<!--.*?-->", "", "\n".join(body_lines), flags=re.DOTALL)
+
+    substantive_lines = []
+    for line in clean_body.splitlines():
+        trimmed = line.strip()
+        if not trimmed:
+            continue
+        # Check for empty placeholder markers
+        if re.match(r"^(?:[-*]\s*)?(?:TODO\b.*|TBD\b.*|None(?:\s+yet)?|N/A|\[.*?\]|\[?\s*\]?)$", trimmed, re.IGNORECASE):
+            continue
+        substantive_lines.append(trimmed)
+
+    if not substantive_lines:
+        return f"Doc {doc_name} has empty/placeholder '## Lessons Learned' section. Substantive reflections are required before closeout."
+    return None
+
+
+def validate_frontmatter_schema(doc_path):
+    """Validate YAML frontmatter against required PDDA schema (GH-496)."""
+    doc_name = os.path.basename(doc_path)
+    if not os.path.isfile(doc_path):
+        return f"Doc {doc_name} does not exist."
+    try:
+        with open(doc_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except Exception as e:
+        return f"Cannot read {doc_name}: {e}"
+
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return f"Doc {doc_name} missing opening YAML frontmatter delimiter ('---') at line 1."
+
+    closing_idx = -1
+    for i, line in enumerate(lines[1:], 1):
+        if line.strip() == "---":
+            closing_idx = i
+            break
+
+    if closing_idx == -1:
+        return f"Doc {doc_name} missing closing YAML frontmatter delimiter ('---')."
+
+    fm = {}
+    for line in lines[1:closing_idx]:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" in line:
+            k, v = line.split(":", 1)
+            fm[k.strip().lower()] = v.strip().strip("'\"")
+
+    required_keys = ["title", "status", "created", "updated", "owner", "goal"]
+    missing = [k for k in required_keys if not fm.get(k)]
+    if missing:
+        return f"Doc {doc_name} frontmatter missing required field(s): {', '.join(missing)}"
+
+    date_re = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    for date_key in ("created", "updated"):
+        val = fm.get(date_key, "")
+        val_date = val.split()[0] if val else ""
+        if not date_re.match(val_date):
+            return f"Doc {doc_name} frontmatter field '{date_key}' has invalid date format: '{val}' (expected YYYY-MM-DD)."
+
+    return None
+
+
 def validate_and_update_doc(doc_path, pr_meta, is_merged=True, dry_run=False, journal=None):
     """Assert ## Lessons Learned, update frontmatter, and compute destination path."""
     with open(doc_path, "r", encoding="utf-8", errors="replace") as f:
@@ -525,12 +741,10 @@ def validate_and_update_doc(doc_path, pr_meta, is_merged=True, dry_run=False, jo
         ship_date = datetime.now().strftime("%Y-%m-%d")
 
     if is_merged:
-        # Assert lessons learned section exists for merged docs
-        if not re.search(r"##\s+Lessons\s+Learned", content, re.IGNORECASE):
-            die(
-                f"Doc {os.path.basename(doc_path)} is missing mandatory '## Lessons Learned (For Future Agents)' section.",
-                code=5,
-            )
+        # Assert lessons learned section exists and has substantive content for merged docs (GH-496)
+        ll_err = validate_lessons_learned(content, os.path.basename(doc_path))
+        if ll_err:
+            die(ll_err, code=5)
 
         new_status = "Complete"
         dest_folder = "3-COMPLETED"
@@ -924,6 +1138,37 @@ def snapshot_ledger_artifacts(repo_root, dry_run=False, journal=None):
             journal.track_created(path)
 
 
+def compute_marathon_planner_fingerprint(repo_root):
+    """Compute a SHA256 digest of canonical marathon inputs to avoid redundant replanning (GH-496)."""
+    h = hashlib.sha256()
+    db_path = os.path.join(repo_root, "releases.db")
+    if os.path.isfile(db_path):
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            cur = conn.cursor()
+            cur.execute("SELECT global_id, gh_number, title, section, position, complexity, risk, effort FROM roadmap_items ORDER BY global_id")
+            for row in cur.fetchall():
+                h.update(str(row).encode("utf-8"))
+            conn.close()
+        except Exception:
+            pass
+
+    working_dir = os.path.join(repo_root, "PROJECT", "2-WORKING")
+    if os.path.isdir(working_dir):
+        for fname in sorted(os.listdir(working_dir)):
+            if fname.endswith(".md"):
+                h.update(fname.encode("utf-8"))
+
+    planner_src = harness_tool(repo_root, "utils/py/marathon_plan.py")
+    if os.path.isfile(planner_src):
+        try:
+            with open(planner_src, "rb") as f:
+                h.update(f.read())
+        except Exception:
+            pass
+    return h.hexdigest()
+
+
 def run_subprocesses(repo_root, dry_run=False, journal=None, reconciled_issues=None):
     """Orchestrate releases sync, view exports, and marathon replanning with DB rollback protection."""
     log("Running downstream database sync and dashboard regeneration...")
@@ -951,6 +1196,7 @@ def run_subprocesses(repo_root, dry_run=False, journal=None, reconciled_issues=N
     check_cmd = ["python3", releases_app, "--root", repo_root, "check"]
     timeline_cmd = ["python3", harness_tool(repo_root, "utils/timeline/export_timeline.py"), "--preview"]
     dash_cmd = ["bash", harness_tool(repo_root, "utils/roadmap-dashboard.sh")]
+    lb_cmd = ["bash", harness_tool(repo_root, "utils/leaderboard.sh")]
     plan_cmd = ["bash", harness_tool(repo_root, "utils/marathon-plan.sh"), "--format", "json"]
 
     if dry_run:
@@ -961,30 +1207,39 @@ def run_subprocesses(repo_root, dry_run=False, journal=None, reconciled_issues=N
         ("releases roadmap sync", sync_cmd),
         ("releases check", check_cmd),
     ]
+    skip_marathon = False
+    fp_dir = os.path.join(repo_root, ".tick")
+    fp_file = os.path.join(fp_dir, "marathon-plan.fingerprint")
+    plan_fp = compute_marathon_planner_fingerprint(repo_root)
+
     if not dry_run:
-        # GH-474: RELEASES-PREVIEW.html is an ADOPTED view — opt-in by presence. Every other
-        # consumer already treats it that way: releases_app.refresh_preview() skips it when
-        # absent (utils/py/releases_app.py:1170-1201), the merge resolver regenerates only what
-        # is already there (utils/releases-merge-resolve.sh:160-172), express.py snapshots it
-        # under os.path.lexists (utils/py/express.py:202-207) and jog_run.py stages it the same
-        # way. This step was the ONE consumer that regenerated it unconditionally, so a repo
-        # that had deliberately un-adopted the view got it silently recreated on the next
-        # reconcile — the deletion would not stick.
-        #
-        # ROADMAP-DASHBOARD.md stays unconditional on purpose, and the asymmetry is the point:
-        # it is NOT adopted-by-presence. It is required — githooks/dashboard-staleness-guard.sh
-        # refuses a push without it and utils/py/router_audit.py gates ROUTER.md's declaration
-        # of it. Regenerating a required view is correct; resurrecting an un-adopted one is not.
+        # GH-474: RELEASES-PREVIEW.html is an ADOPTED view — opt-in by presence.
         if os.path.exists(os.path.join(repo_root, "RELEASES-PREVIEW.html")):
             steps.append(("export_timeline.py --preview", timeline_cmd))
         else:
             log("  (skipping export_timeline.py --preview — RELEASES-PREVIEW.html is not adopted here)")
-        steps.extend(
-            [
-                ("roadmap-dashboard.sh", dash_cmd),
-                ("marathon-plan.sh", plan_cmd),
-            ]
-        )
+        steps.append(("roadmap-dashboard.sh", dash_cmd))
+        if os.path.exists(os.path.join(repo_root, "LEADERBOARD.md")):
+            if os.path.exists(harness_tool(repo_root, "utils/leaderboard.sh")):
+                steps.append(("leaderboard.sh", lb_cmd))
+            else:
+                log("  (skipping leaderboard.sh — utils/leaderboard.sh not found)")
+        else:
+            log("  (skipping leaderboard.sh — LEADERBOARD.md is not adopted here)")
+
+        has_plan = bool(glob.glob(os.path.join(repo_root, "PROJECT", "2-WORKING", "MARATHON-PLAN-*.md"))) or bool(glob.glob(os.path.join(repo_root, "MARATHON-PLAN-*.md")))
+        if has_plan and os.path.isfile(fp_file):
+            try:
+                with open(fp_file, "r") as f:
+                    if f.read().strip() == plan_fp:
+                        skip_marathon = True
+            except Exception:
+                pass
+
+        if skip_marathon:
+            log("  (skipping marathon-plan.sh — canonical inputs unchanged)")
+        else:
+            steps.append(("marathon-plan.sh", plan_cmd))
     else:
         steps.append(("marathon-plan.sh --dry-run", plan_cmd))
 
@@ -994,15 +1249,26 @@ def run_subprocesses(repo_root, dry_run=False, journal=None, reconciled_issues=N
     try:
         for name, cmd in steps:
             log(f"  -> {name}")
-            # GH-429: roadmap-dashboard.sh derives ROOT from its own location and lands on <repo>/.xyz
-            # when vendored (#215 item 2); it honours this override, and the reconciler already knows
-            # the repo root. Harmless for the other steps, which ignore the variable.
-            step_env = dict(os.environ, ROADMAP_DASHBOARD_ROOT=str(repo_root))
+            # GH-429 / GH-496: dashboard and leaderboard paths
+            step_env = dict(
+                os.environ,
+                ROADMAP_DASHBOARD_ROOT=str(repo_root),
+                LEADERBOARD_DB=str(os.path.join(repo_root, "releases.db")),
+                LEADERBOARD_OUTPUT=str(os.path.join(repo_root, "LEADERBOARD.md")),
+            )
             r = subprocess.run(cmd, cwd=repo_root, capture_output=True, text=True, check=False, env=step_env)
             if name.startswith("marathon-plan"):
                 handle_marathon_plan_result(r, reconciled_issues or set())
             elif r.returncode != 0:
                 die(f"Subprocess '{name}' failed with exit {r.returncode}:\n{r.stderr}\n{r.stdout}", code=6)
+
+        if not dry_run and not skip_marathon:
+            try:
+                os.makedirs(fp_dir, exist_ok=True)
+                with open(fp_file, "w") as f:
+                    f.write(plan_fp)
+            except Exception:
+                pass
     finally:
         if journal and not dry_run:
             for plan_doc in _plan_docs() - pre_plan_docs:
@@ -1030,6 +1296,133 @@ def run_validation_gate(repo_root):
         found = re.search(r"(\d+) error\(s\) found", r.stdout)
         count = found.group(1) if found else "some"
         log(f"  WARNING — pdda reported {count} finding(s) but exited 0 (repo enforcement mode is not blocking); continuing")
+
+
+def run_pre_merge(repo_root, args):
+    """Execute pre-merge validation checks for PR or current branch (GH-496)."""
+    log("Running pre-merge closeout checks...")
+    try:
+        head_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=repo_root, text=True
+        ).strip()
+    except Exception as e:
+        die(f"Cannot determine HEAD SHA: {e}", code=2)
+
+    pr_num = None
+    pr_title = ""
+    pr_body = ""
+    if args.pr:
+        pr_num = args.pr[0]
+        try:
+            r = subprocess.run(
+                ["gh", "pr", "view", str(pr_num), "--json", "number,title,body,headRefOid"],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if r.returncode == 0:
+                data = json.loads(r.stdout)
+                pr_title = data.get("title", "")
+                pr_body = data.get("body", "")
+                head_sha = data.get("headRefOid") or head_sha
+        except Exception:
+            pass
+
+    if not pr_title and not pr_body:
+        try:
+            commits_text = subprocess.check_output(
+                ["git", "log", "-n", "10", "--format=%B"],
+                cwd=repo_root,
+                text=True,
+            )
+            pr_title = commits_text.splitlines()[0] if commits_text else ""
+            pr_body = commits_text
+        except Exception:
+            pass
+
+    repo_slug = github_slug_from_origin(repo_root)
+    closers, mentions = extract_linked_issues({"title": pr_title, "body": pr_body}, repo_slug=repo_slug)
+    log(f"  Target: {('PR #' + str(pr_num)) if pr_num else head_sha[:10]}")
+    log(f"  Closing issues detected: {closers or '(none)'}")
+
+    diff_docs = []
+    try:
+        diff_status = subprocess.check_output(
+            ["git", "diff", "--name-status", "HEAD~1..HEAD"],
+            cwd=repo_root,
+            text=True,
+        ).splitlines()
+        for dline in diff_status:
+            parts = dline.split()
+            if len(parts) >= 2:
+                for p in parts[1:]:
+                    if "PROJECT/2-WORKING/" in p and p.endswith(".md"):
+                        diff_docs.append(os.path.join(repo_root, p))
+    except Exception:
+        pass
+
+    target_docs = set()
+    errors = []
+
+    for issue_num in closers:
+        working_dir = os.path.join(repo_root, "PROJECT", "2-WORKING")
+        matches = []
+        if os.path.isdir(working_dir):
+            for fname in sorted(os.listdir(working_dir)):
+                if fname.endswith(".md") and re.search(rf"(?:^|[^\d])(GH-)?{issue_num}(?:[^\d]|$)", fname, re.IGNORECASE):
+                    matches.append(os.path.join(working_dir, fname))
+        if len(matches) > 1:
+            errors.append(f"Ambiguous active doc match for issue #{issue_num}: {', '.join(os.path.basename(m) for m in matches)}")
+        elif len(matches) == 1:
+            target_docs.add(matches[0])
+        else:
+            completed_dir = os.path.join(repo_root, "PROJECT", "3-COMPLETED")
+            comp_matches = [
+                os.path.join(completed_dir, f)
+                for f in os.listdir(completed_dir)
+                if f.endswith(".md") and re.search(rf"(?:^|[^\d])(GH-)?{issue_num}(?:[^\d]|$)", f, re.IGNORECASE)
+            ] if os.path.isdir(completed_dir) else []
+            if comp_matches:
+                target_docs.add(comp_matches[0])
+
+    for d in diff_docs:
+        if os.path.isfile(d):
+            target_docs.add(d)
+
+    log(f"  Active docs evaluated: {[os.path.basename(d) for d in sorted(target_docs)] or '(none)'}")
+
+    doc_contract_failed = False
+    for doc_path in sorted(target_docs):
+        doc_name = os.path.basename(doc_path)
+        # 1. Frontmatter
+        fm_err = validate_frontmatter_schema(doc_path)
+        if fm_err:
+            errors.append(fm_err)
+            doc_contract_failed = True
+
+        # 2. Lessons Learned
+        with open(doc_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        ll_err = validate_lessons_learned(content, doc_name)
+        if ll_err:
+            errors.append(ll_err)
+            doc_contract_failed = True
+
+    # 3. Test receipts
+    receipt_err = validate_pre_merge_receipts(repo_root, head_sha, pr_num)
+    if receipt_err:
+        errors.append(receipt_err)
+
+    if errors:
+        log_err("Pre-merge validation FAILED with the following error(s):")
+        for e in errors:
+            log_err(f"  - {e}")
+        exit_code = 5 if doc_contract_failed else 6
+        sys.exit(exit_code)
+
+    log("Pre-merge validation PASSED! ✅")
+    sys.exit(0)
 
 
 def main():
@@ -1094,21 +1487,43 @@ def main():
         dest="require_receipts",
         help="Require a receipt matching each PR number or exact merge commit before closeout (GH-425)",
     )
+    parser.add_argument(
+        "--pre-merge",
+        action="store_true",
+        help="Run read-only pre-merge checks on closing active docs (frontmatter, lessons learned, test receipts) (GH-496)",
+    )
+    parser.add_argument(
+        "--force-local-reconcile",
+        action="store_true",
+        help="Bypass hosted in-flight reconciler check for emergency local reconciliation (GH-496)",
+    )
 
     parser.add_argument("--catch-up", action="store_true", help="Recover closed-issue drift from committed docs and manifest")
 
     args = parser.parse_args()
 
     repo_root = os.path.abspath(args.root) if args.root else resolve_repo_root()
+
+    if args.pre_merge:
+        run_pre_merge(repo_root, args)
+        return
+
     lock_file = os.path.join(repo_root, ".git", "wave-reconcile.lock")
     journal = RollbackJournal()
     baseline = None
 
     try:
+        if args.force_local_reconcile and os.environ.get("GITHUB_ACTIONS") == "true":
+            die("--force-local-reconcile is prohibited inside GITHUB_ACTIONS", code=2)
+
         # Preflight phase
         log(f"Starting wave reconciliation (dry_run={args.dry_run}, root={repo_root})")
         baseline = check_porcelain_cleanliness(repo_root, allow_dirty=(args.allow_dirty or args.dry_run))
         check_current_branch(repo_root, skip_branch_check=args.skip_branch_check)
+
+        repo_slug = github_slug_from_origin(repo_root)
+        if not args.offline and not args.dry_run and os.environ.get("GITHUB_ACTIONS") != "true":
+            check_hosted_reconciler_in_flight(repo_root, repo_slug=repo_slug, force=args.force_local_reconcile)
 
         if not args.skip_pull and not args.dry_run and not args.offline:
             pull_upstream(repo_root)

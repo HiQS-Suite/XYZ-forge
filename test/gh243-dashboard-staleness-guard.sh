@@ -26,19 +26,22 @@ git -c user.email=t@t -c user.name=t commit -q -m "ledger write, no dashboard"
 LEDGER_ONLY="$(git rev-parse HEAD)"
 cd "$root"
 
-# 1. Ledger write without dashboard -> refuse (exit 1) with the regen instruction.
+# 1. Ledger write without dashboard when renderer cannot run -> refuse (exit 1).
 rc=0; out="$(bash "$GUARD" "$R" "$LEDGER_ONLY" "$BASE" 2>&1)" || rc=$?
 [ "$rc" -eq 1 ] || fail "expected refusal (1), got $rc"
-grep -q "roadmap-dashboard.sh" <<<"$out" || fail "refusal missing the regeneration instruction"
+grep -q "cannot be rendered into a valid dashboard" <<<"$out" || fail "refusal missing the renderer failure explanation"
 
-# 2. Same range with the dashboard regenerated in it -> pass.
+# 2. Committing dashboard without modifying renderer -> refuse (exit 1) (GH-496 Phase 2 View Decoupling).
 cd "$R"
 echo "dash v2" > ROADMAP-DASHBOARD.md
 git add ROADMAP-DASHBOARD.md
-git -c user.email=t@t -c user.name=t commit -q -m "regen dashboard"
-FIXED="$(git rev-parse HEAD)"
+git -c user.email=t@t -c user.name=t commit -q -m "unauthorized routine dashboard commit"
+UNAUTH="$(git rev-parse HEAD)"
 cd "$root"
-bash "$GUARD" "$R" "$FIXED" "$BASE" || fail "regenerated range should pass, got $?"
+rc=0; out="$(bash "$GUARD" "$R" "$UNAUTH" "$BASE" 2>&1)" || rc=$?
+[ "$rc" -eq 1 ] || fail "expected refusal (1) for routine view commit, got $rc"
+grep -q "Under GH-496 Phase 2" <<<"$out" || fail "expected Phase 2 view decoupling explanation"
+FIXED="$UNAUTH"
 
 # 3. Legacy-mode repo (no releases marker) -> guard is inert even on a ledger-only range.
 cd "$R"; : > .pdda-mode; cd "$root"
@@ -143,5 +146,21 @@ CHATTY="$(git rev-parse HEAD)"
 cd "$root"
 bash "$GUARD" "$R" "$CHATTY" "$RENDERED" \
   || fail "unrelated renderer stderr must not be read as a dropped row, got $?"
+
+# 9. Unauthorized LEADERBOARD.md commit without modifying renderer -> refuse (exit 1) (GH-496 Phase 2).
+cd "$R"
+echo "leaderboard v1" > LEADERBOARD.md
+git add LEADERBOARD.md
+git -c user.email=t@t -c user.name=t commit -q -m "unauthorized leaderboard commit"
+UNAUTH_LB="$(git rev-parse HEAD)"
+cd "$root"
+rc=0; out="$(bash "$GUARD" "$R" "$UNAUTH_LB" "$CHATTY" 2>&1)" || rc=$?
+[ "$rc" -eq 1 ] || fail "expected refusal (1) for routine leaderboard commit, got $rc"
+grep -q "Under GH-496 Phase 2" <<<"$out" || fail "expected Phase 2 view decoupling explanation for leaderboard"
+
+# 10. GITHUB_ACTIONS=true bypasses the view refusal (reconciler bot on development).
+cd "$root"
+GITHUB_ACTIONS=true bash "$GUARD" "$R" "$UNAUTH_LB" "$CHATTY" \
+  || fail "GITHUB_ACTIONS=true must permit reconciler view commits, got $?"
 
 echo "== GH-243 ALL PASSED =="

@@ -1,0 +1,26 @@
+Plan QA review for GH-496 PR 2 (Phase 2): Single Reconciliation Owner, View Decoupling & Pre-Merge Closeout Checks.
+
+Context:
+PR 1 (selective CI baseline & telemetry externalization) has been completed and opened as PR #548.
+PR 2 tackles:
+1. Reconciler single-writer protection:
+   - Hosted wave-reconcile.yml is the single normal landing writer for development.
+   - Local wave_reconcile.py becomes a protected fallback. Before execution, check if hosted workflow wave-reconcile.yml is in-flight (using gh run list --workflow wave-reconcile.yml) to prevent concurrent write races.
+   - Avoid redundant marathon plan generation in wave_reconcile.py when inputs are unchanged.
+2. View decoupling & generation stamping:
+   - Task branches stop committing routine ROADMAP-DASHBOARD.md and LEADERBOARD.md outputs.
+   - Committed views are owned and staged by reconciliation on development.
+   - Embed exact generation metadata from releases.db settings into ROADMAP-DASHBOARD.md and LEADERBOARD.md headers so view consumers can verify freshness.
+   - githooks/dashboard-staleness-guard.sh: semantic validation of task-branch ledger writes (allowing clean renders without committed dashboards; refusing dropped/corrupted rows; and refusing routine dashboard commits on task branches unless renderer source is modified).
+3. Deterministic pre-merge closeout check:
+   - Add --pre-merge flag to wave_reconcile.py to validate closing active docs (under PROJECT/2-WORKING/) have non-empty ## Lessons Learned, valid frontmatter, and test receipts BEFORE merge.
+   - Red control: doc missing ## Lessons Learned fails pre-merge check with exit code 5.
+4. Governance doc alignment:
+   - Update AGENTS.md, SOP.md, and skills/merge-cleanup/SKILL.md to establish hosted reconciliation as normal path and local reconcile as fallback.
+
+Please review this plan against XYZ-forge architecture and Phase 2 requirements:
+1. Are there edge cases or failure modes with the reconciler in-flight check? (e.g. offline gh, rate limits, non-interactive environments, force bypass flag?)
+2. How should githooks/dashboard-staleness-guard.sh distinguish between legitimate renderer changes (where committing dashboard is expected/required) vs routine task branches (where committing dashboard causes merge collisions and should be refused)?
+3. What is the cleanest backward-compatible syntax for generation stamping in ROADMAP-DASHBOARD.md and LEADERBOARD.md?
+4. Are there subtle traps with wave_reconcile.py --pre-merge doc discovery or test receipt verification?
+Provide actionable feedback and concrete recommendations.

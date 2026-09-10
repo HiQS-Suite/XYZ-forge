@@ -238,10 +238,12 @@ teardown — the same rule as `AGENTS.md` §6.
 2. **Batch same-seam scopes into one PR.** Five small PRs touching one seam is five
    gate + merge + reconcile cycles for what is really one unit of review. GH-291 shipped
    Scopes 1+5, 3+4, and 2 as three PRs; two would have carried the same review weight.
-3. **Batch reconciles.** The post-merge rule is "run `wave_reconcile.py --pr <N>` before
-   ending the task" — not "instantly, once per merge." Land 2–3 merges, then run one
-   reconcile pass for the batch. Each per-merge reconcile otherwise costs an extra
-   commit + gated push on `development`.
+3. **Reconciliation ownership and batching.** Hosted `wave-reconcile.yml` is the primary landing
+   writer on `development`, automatically reconciling docs, ledger, and views. If running local
+   reconciliation as fallback, the rule is to let hosted runs finish (or pass `--force-local-reconcile`
+   in emergencies) and batch multiple PRs (`wave_reconcile.py --pr <N> <M>`) rather than running
+   instantly per merge. Task branches must not commit routine view updates (`ROADMAP-DASHBOARD.md`,
+   `LEADERBOARD.md`).
 4. **Never write bare `#N` for another repo's issues in a PR body.** The reconciler
    resolves every `#N` against *this* repo and exits 6 when it cannot (GH-301 needed an
    offline-manifest escape mid-reconcile). Cross-repo references are written `GH-N`;

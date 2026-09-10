@@ -206,7 +206,8 @@ echo "-- the leaderboard pipeline"
 LB_MD="$WORK/LEADERBOARD.md"
 LEADERBOARD_DB="$R/releases.db" LEADERBOARD_OUTPUT="$LB_MD" bash "$HERE/../utils/leaderboard.sh" >/dev/null 2>&1
 ok "leaderboard.sh renders LEADERBOARD.md from the exporter's JSON" "$([ -s "$LB_MD" ]; echo $?)"
-if grep -q 'GENERATED' <<<"$(head -1 "$LB_MD")"; then ok "the file announces itself as generated (never hand-edited)" 0; else ok "generated header" 1; fi
+if grep -Eq '^<!-- releases-app generation: [0-9]+ -->$' <<<"$(head -1 "$LB_MD")"; then ok "the file carries the releases-app generation marker" 0; else ok "generation marker" 1; fi
+if grep -q 'GENERATED' <<<"$(head -2 "$LB_MD")"; then ok "the file announces itself as generated (never hand-edited)" 0; else ok "generated header" 1; fi
 # POSIX sed rather than `rg`: ripgrep is not a documented prerequisite (README lists Codex CLI, agy
 # CLI, Node 18+, git, Python 3.8+) and this suite was the only thing in test/ or utils/ that needed
 # it, so the whole suite failed on any host without it. Handles both the linked `[GH-n](url)` and

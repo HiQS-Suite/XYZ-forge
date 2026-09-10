@@ -87,7 +87,7 @@ updated: 2026-08-22
 ---
 # GH-444: Separatorless
 ## Lessons Learned (For Future Agents)
-- None
+- Always preserve separatorless formatting when archiving entries.
 EOF
 
 cat << 'EOF' > "$REPO/PROJECT/2-WORKING/GH-777-DECLINED.md"
@@ -180,6 +180,13 @@ exit 0
 EOF
 chmod +x "$REPO/utils/marathon-plan.sh"
 
+cat << 'EOF' > "$REPO/utils/leaderboard.sh"
+#!/usr/bin/env bash
+echo "MOCK: leaderboard OK"
+exit 0
+EOF
+chmod +x "$REPO/utils/leaderboard.sh"
+
 cat << 'EOF' > "$REPO/utils/timeline/export_timeline.py"
 #!/usr/bin/env python3
 import sys
@@ -264,8 +271,11 @@ EOF
 git -C "$REPO" add -A && git -C "$REPO" commit -q -m "valid doc restored"
 
 # Test 5: Live reconciliation execution with merged and unmerged PRs
+set +e
 out="$(python3 "$REPO/utils/py/wave_reconcile.py" --root "$REPO" --pr 1001 1002 1003 --offline "$REPO/manifest.json" --skip-pull --gate 2>&1)"
 rc=$?
+set -e
+[ "$rc" -eq 0 ] || echo "TEST 5 FAILED (rc=$rc): $out"
 assert_eq "Live reconciliation exits 0" "$rc" "0"
 
 # Verify merged doc moved to 3-COMPLETED and frontmatter updated

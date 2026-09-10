@@ -103,91 +103,151 @@ while [ "$#" -ge 2 ]; do
 
   touched_ledger=0
   touched_dashboard=0
+  touched_leaderboard=0
+  touched_dashboard_renderer=0
+  touched_leaderboard_renderer=0
+
   while IFS= read -r path; do
     case "$path" in
       releases.sql|releases.db) touched_ledger=1 ;;
       ROADMAP-DASHBOARD.md)     touched_dashboard=1 ;;
+      LEADERBOARD.md)           touched_leaderboard=1 ;;
+      utils/roadmap-dashboard.sh|utils/py/releases_app.py) touched_dashboard_renderer=1 ;;
+      utils/leaderboard.sh|utils/timeline/export_timeline.py) touched_leaderboard_renderer=1 ;;
     esac
   done < <(git -C "$REPO" diff --no-renames --name-only "$remote_sha" "$local_sha" 2>/dev/null)
 
-  if [ "$touched_ledger" -eq 1 ] && [ "$touched_dashboard" -eq 0 ]; then
-    # GH-257 Task 4: check whether regenerating ROADMAP-DASHBOARD.md produces drift or no diff.
-    # Run the diagnosis against a commit-pinned temporary projection of local_sha inside the
-    # private GUARD_ROOT_PHYS so uncommitted working-tree modifications do not skew the classification.
-    TMP_PROJ="$GUARD_ROOT_PHYS/proj-$local_sha"
-    mkdir -p "$TMP_PROJ"
-
-    drift_detected=1
-    render_err=""
-    if git -C "$REPO" archive "$local_sha" 2>/dev/null | tar -x -C "$TMP_PROJ" 2>/dev/null \
-       && [ -f "$TMP_PROJ/utils/roadmap-dashboard.sh" ]; then
-      # GH-474: KEEP the renderer's stderr. `--check` runs the full render before it reaches its
-      # mode branch (utils/roadmap-dashboard.sh — node render, then `if [[ "$MODE" == "check" ]]`),
-      # so the dropped-row warning it already emits is available here. Discarding it is what
-      # forced the no-drift arm below to infer the same fact from table names.
-      # `2>&1 >/dev/null` keeps stderr and drops stdout (order matters); the assignment carries
-      # the renderer's own exit status, so the drift verdict is unchanged.
-      if render_err="$(bash "$TMP_PROJ/utils/roadmap-dashboard.sh" --check 2>&1 >/dev/null)"; then
-        drift_detected=0
-      else
-        drift_detected=1
-      fi
-    fi
-
-    if [ "$drift_detected" -eq 1 ]; then
+  # Check 1: View Decoupling (GH-496 Phase 2)
+  # Task branches must NOT commit routine ROADMAP-DASHBOARD.md or LEADERBOARD.md.
+  # Views are owned and staged by the reconciliation workflow on development upon landing.
+  # View commits are permitted only if the causal renderer dependency was modified in the range,
+  # or in GITHUB_ACTIONS (where the reconciler bot commits views).
+  if [ "${GITHUB_ACTIONS:-}" != "true" ]; then
+    if [ "$touched_dashboard" -eq 1 ] && [ "$touched_dashboard_renderer" -eq 0 ]; then
       cat >&2 <<'EOF'
-dashboard-staleness-guard: REFUSING the push — this range writes the roadmap ledger
-(releases.sql / releases.db) without regenerating ROADMAP-DASHBOARD.md, so the human-readable
-view would ship stale against the data under it (GH-243 / GH-169 item 3).
+dashboard-staleness-guard: REFUSING the push — this range modifies ROADMAP-DASHBOARD.md
+without modifying its renderer (utils/roadmap-dashboard.sh or utils/py/releases_app.py).
 
-Fix (one command, then commit the result into the same push):
-    bash utils/roadmap-dashboard.sh && git add ROADMAP-DASHBOARD.md && git commit -m "docs: regenerate roadmap dashboard"
+Under GH-496 Phase 2, generated views are owned and staged by the reconciliation workflow
+on development. Task branches must not commit routine view updates, to prevent merge collisions.
+
+Fix (drop the view commit while keeping your ledger changes):
+    git rm --cached ROADMAP-DASHBOARD.md && git commit --amend
 
 Bypass (deliberately loud, e.g. a WIP branch): git push --no-verify
 EOF
+      exit 1
+    fi
+
+    if [ "$touched_leaderboard" -eq 1 ] && [ "$touched_leaderboard_renderer" -eq 0 ]; then
+      cat >&2 <<'EOF'
+dashboard-staleness-guard: REFUSING the push — this range modifies LEADERBOARD.md
+without modifying its renderer (utils/leaderboard.sh or utils/timeline/export_timeline.py).
+
+Under GH-496 Phase 2, generated views are owned and staged by the reconciliation workflow
+on development. Task branches must not commit routine view updates, to prevent merge collisions.
+
+Fix (drop the view commit while keeping your other changes):
+    git rm --cached LEADERBOARD.md && git commit --amend
+
+Bypass (deliberately loud, e.g. a WIP branch): git push --no-verify
+EOF
+      exit 1
+    fi
+  fi
+
+  # Check 2: Renderer sync validation when renderer dependencies are modified
+  if [ "$touched_dashboard" -eq 1 ] && [ "$touched_dashboard_renderer" -eq 1 ]; then
+    TMP_PROJ="$GUARD_ROOT_PHYS/proj-$local_sha"
+    mkdir -p "$TMP_PROJ"
+    if git -C "$REPO" archive "$local_sha" 2>/dev/null | tar -x -C "$TMP_PROJ" 2>/dev/null \
+       && [ -f "$TMP_PROJ/utils/roadmap-dashboard.sh" ]; then
+      if ! bash "$TMP_PROJ/utils/roadmap-dashboard.sh" --check 2>&1 >/dev/null; then
+        cat >&2 <<'EOF'
+dashboard-staleness-guard: REFUSING the push — renderer changes were committed but
+ROADMAP-DASHBOARD.md is not in sync with the updated renderer output.
+
+Regenerate and commit:
+    bash utils/roadmap-dashboard.sh && git add ROADMAP-DASHBOARD.md && git commit --amend
+EOF
+        exit 1
+      fi
+    fi
+  fi
+
+  if [ "$touched_leaderboard" -eq 1 ] && [ "$touched_leaderboard_renderer" -eq 1 ]; then
+    TMP_PROJ="$GUARD_ROOT_PHYS/proj-$local_sha"
+    mkdir -p "$TMP_PROJ"
+    if git -C "$REPO" archive "$local_sha" 2>/dev/null | tar -x -C "$TMP_PROJ" 2>/dev/null \
+       && [ -f "$TMP_PROJ/utils/leaderboard.sh" ]; then
+      if ! bash "$TMP_PROJ/utils/leaderboard.sh" --check 2>&1 >/dev/null; then
+        cat >&2 <<'EOF'
+dashboard-staleness-guard: REFUSING the push — renderer changes were committed but
+LEADERBOARD.md is not in sync with the updated renderer output.
+
+Regenerate and commit:
+    bash utils/leaderboard.sh && git add LEADERBOARD.md && git commit --amend
+EOF
+        exit 1
+      fi
+    fi
+  fi
+
+  # Check 3: Semantic ledger validation (GH-496 Phase 2 + GH-474)
+  # When the ledger is modified, ensure the ledger renders cleanly and drops no rows.
+  if [ "$touched_ledger" -eq 1 ]; then
+    TMP_PROJ="$GUARD_ROOT_PHYS/proj-$local_sha"
+    mkdir -p "$TMP_PROJ"
+
+    render_err=""
+    render_rc=0
+    if git -C "$REPO" archive "$local_sha" 2>/dev/null | tar -x -C "$TMP_PROJ" 2>/dev/null \
+       && [ -f "$TMP_PROJ/utils/roadmap-dashboard.sh" ]; then
+      render_err="$(ROADMAP_DASHBOARD_OUTPUT="$TMP_PROJ/ROADMAP-DASHBOARD.md" bash "$TMP_PROJ/utils/roadmap-dashboard.sh" 2>&1 >/dev/null)" || render_rc=$?
     else
-      # No drift: the committed dashboard matches a fresh render. Exactly one hazard survives
-      # that — a roadmap row the renderer DROPPED. A dropped row renders to nothing, so the
-      # artifact still matches byte-for-byte while the ledger row is invisible in the view.
-      #
-      # GH-474: ASK the renderer instead of guessing. It already names every dropped row on
-      # stderr ("roadmap-dashboard: warning: dropped N unparseable row(s): <ids>", emitted from
-      # the droppedRows array), and $render_err above holds it. This replaces the GH-243/GH-315
-      # table-name allowlist, which had to infer the same fact from the dump's fan-out per write
-      # shape (jog, then marathon) and went short twice — 8 dump tables were still unclassified
-      # and still produced the FALSE refusal this arm exists to prevent.
-      #
-      # Direction of failure, deliberately: this reads the renderer's own report, so it cannot
-      # go short as a table list does. If the renderer is silent, the row rendered — allow.
-      dropped_line=""
-      while IFS= read -r eline; do
-        case "$eline" in
-          *"roadmap-dashboard: warning: dropped "*) dropped_line="$eline"; break ;;
-        esac
-      done <<EOF_ERR
+      render_rc=1
+      render_err="renderer missing or archive failed"
+    fi
+
+    if [ "$render_rc" -ne 0 ]; then
+      cat >&2 <<EOF
+dashboard-staleness-guard: REFUSING the push — this range writes the roadmap ledger
+(releases.sql / releases.db), but the ledger cannot be rendered into a valid dashboard (GH-496).
+
+The renderer reported:
+$render_err
+
+Bypass (deliberately loud, e.g. a WIP branch): git push --no-verify
+EOF
+      exit 1
+    fi
+
+    # GH-474: Check for dropped rows reported by the renderer
+    dropped_line=""
+    while IFS= read -r eline; do
+      case "$eline" in
+        *"roadmap-dashboard: warning: dropped "*) dropped_line="$eline"; break ;;
+      esac
+    done <<EOF_ERR
 $render_err
 EOF_ERR
-      if [ -z "$dropped_line" ]; then
-        continue
-      fi
+    if [ -n "$dropped_line" ]; then
       cat >&2 <<EOF
 dashboard-staleness-guard: REFUSING the push — this range writes the roadmap ledger
 (releases.sql / releases.db) without modifying ROADMAP-DASHBOARD.md, but regenerating the
-dashboard produces NO diff (GH-243 / GH-257).
+dashboard produces NO diff (GH-243 / GH-257 / GH-474).
 
-The renderer dropped a roadmap row, so it contributes nothing to the view and the artifact
-still matches. It reported:
+The renderer dropped a roadmap row, so it contributes nothing to the view.
+It reported:
     $dropped_line
 
 Correct the named row with:
     releases roadmap update --issue-num <N> --raw-text "- **GH-<N> · <title>** ..."
-then regenerate and commit:
-    bash utils/roadmap-dashboard.sh && git add releases.db releases.sql ROADMAP-DASHBOARD.md && git commit -m "docs: fix roadmap row and regenerate dashboard"
 
 Bypass (deliberately loud, e.g. a WIP branch): git push --no-verify
 EOF
+      exit 1
     fi
-    exit 1
   fi
 done
 
