@@ -1132,6 +1132,7 @@ def snapshot_ledger_artifacts(repo_root, dry_run=False, journal=None):
         "releases.db", "releases.sql", "RELEASES.generated.md",
         "ROADMAP-DASHBOARD.md", "RELEASES-PREVIEW.html",
         "LEADERBOARD.html", "LEADERBOARD.md",
+        os.path.join(".tick", "marathon-plan.fingerprint"),
     ):
         path = os.path.abspath(os.path.join(repo_root, name))
         if path in journal.backups or path in journal.created_files:
@@ -1160,7 +1161,7 @@ def compute_marathon_planner_fingerprint(repo_root):
     working_dir = os.path.join(repo_root, "PROJECT", "2-WORKING")
     if os.path.isdir(working_dir):
         for fname in sorted(os.listdir(working_dir)):
-            if fname.endswith(".md"):
+            if fname.endswith(".md") and not fname.startswith("MARATHON-PLAN-"):
                 h.update(fname.encode("utf-8"))
 
     planner_src = harness_tool(repo_root, "utils/py/marathon_plan.py")
