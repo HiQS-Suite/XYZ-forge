@@ -7,7 +7,7 @@ owner: Antigravity (implementation); independent reviewer (QA)
 goal: Reduce merge churn by relocating routine telemetry and decoupling generated views first, then select CI by impact across four profiles using the existing selector
 gh_issue: 496
 source: https://github.com/HiQS-Labs/XYZ-forge/issues/496#issuecomment-5611834496
-branch: feat/gh496-selective-ci
+branch: feat/gh496-phase2-views
 doc_type: enhancement
 effort: 4
 complexity: 3
@@ -23,7 +23,7 @@ Steering / Execution alignment: XYZ AgentChorus #358084 (stored in AgentChorus s
 
 | What was just completed | What's next |
 |---|---|
-| Codex review addressed: concurrency test, integrity override hardening, atomic replacement, worktree/remote normalization | Re-run gate qualification in disposable clone; push & open PR 1 |
+| PR 1 qualified and submitted in #548; Phase 2 implementation plan drafted and approved | Run Codex Plan QA via consult; execute Phase 2 implementation |
 
 ## Problem statement
 
@@ -50,7 +50,7 @@ These shared files cause repeated merge collisions across parallel task branches
 5. **PR 5: Phase 5 (Contention Serialization & Speed Benchmark)**
    - Serialize known-flaky contention (GH-528) and measure performance across replay corpus.
 
-## PR 1 Execution Checklist (Phase 0 & Phase 1)
+## PR 1 Execution Checklist (Phase 0 & Phase 1) — Delivered (#548)
 
 ### Phase 0: Baseline Freeze, Recon Map, and Preservation Spikes
 - [x] Create fresh full clone at `~/marathon-clones/xyz-gh496-build` on `feat/gh496-selective-ci`.
@@ -72,3 +72,35 @@ These shared files cause repeated merge collisions across parallel task branches
 - [x] Tests hermetically contain all telemetry writes to fixture directories with zero writes to real home directory.
 - [x] Curated model registry configurations and benchmarks remain versioned and accessible in git.
 - [x] Full gate passes in a disposable clone with committed provenance and test logs.
+
+---
+
+## PR 2 Execution Checklist (Phase 2 — Single Reconciliation Owner, View Decoupling & Pre-Merge Closeout Checks)
+
+### Single Reconciliation Owner & Automation Protection
+- [ ] Keep hosted `wave-reconcile.yml` as the single normal landing writer; protect local execution with workflow in-flight checks (`gh run list`).
+- [ ] Update `AGENTS.md`, `SOP.md`, and `skills/merge-cleanup/SKILL.md` to document hosted completion as normal path and local reconcile as fallback.
+- [ ] Minimize marathon plan regeneration in `wave_reconcile.py` when inputs are unchanged.
+
+### Generated Views Decoupling & Generation Stamping
+- [ ] `utils/roadmap-dashboard.sh` and `utils/leaderboard.sh` query `releases.db` settings and stamp `generation <N>` in banner and headers.
+- [ ] Task branches render disposable previews (`--preview`) but stop committing routine dashboard outputs.
+- [ ] `githooks/dashboard-staleness-guard.sh`: semantic validation of task-branch ledger writes (allowing clean renders without committed dashboards; refusing dropped rows).
+- [ ] Refuse unauthorized routine dashboard commits on task branches that do not modify renderer source code.
+
+### Deterministic Pre-Merge Closeout Checks
+- [ ] Add read-only `--pre-merge` check to `wave_reconcile.py` validating `## Lessons Learned`, frontmatter, and test receipts on closing docs before merge.
+- [ ] Red control: doc missing `## Lessons Learned` fails pre-merge check with exit code 5.
+
+### Verification & Gate Qualification
+- [ ] Build hermetic test suite `test/gh496-phase2-reconciliation-views.sh`.
+- [ ] Update `test/gh243-dashboard-staleness-guard.sh` and `test/wave-reconcile.sh`.
+- [ ] Run full `./validate.sh` in disposable clone `~/marathon-clones/xyz-gh496-gate-pr2`.
+- [ ] Independent Codex QA review via `relay-automation/consult.sh --models codex`.
+
+## Acceptance Criteria (PR 2)
+- [ ] Two concurrent task branches with distinct ledger writes land without dashboard merge collisions.
+- [ ] Committed `ROADMAP-DASHBOARD.md` and `LEADERBOARD.md` identify their ledger generation.
+- [ ] Pre-merge closeout check catches missing `## Lessons Learned` before merge.
+- [ ] Local reconciliation refuses execution while a hosted workflow is in progress.
+- [ ] Full gate passes in a disposable clone with committed receipts and zero uncommitted churn.
