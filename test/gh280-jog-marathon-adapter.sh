@@ -1032,9 +1032,9 @@ M_OUT="$(GH_STUB_PR_JSON="$CANNED_PR" \
 [ "$rc" -eq 0 ] && pass "M0 promoted executor run exits 0" || fail "M0 exit=$rc: $M_OUT"
 
 # M1 (F3): the dashboard is in sync after a promotion (was drift-red pre-fix)
-bash "$FR/utils/roadmap-dashboard.sh" --check >/dev/null 2>&1 \
+m1_out="$(bash "$FR/utils/roadmap-dashboard.sh" --check 2>&1)" \
   && pass "M1 dashboard in sync after promotion (F3)" \
-  || fail "M1 dashboard drifted after promotion — F3 regen missing"
+  || fail "M1 dashboard drifted after promotion — F3 regen missing: $m1_out"
 
 # M3 (F1): a jog-state commit exists before dispatch, and a containment-style revert
 # of tracked ledger files cannot destroy the queue row anymore

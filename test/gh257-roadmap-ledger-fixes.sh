@@ -463,7 +463,7 @@ REMEDIATED_COMMIT="$(git rev-parse HEAD)"
 cd "$root"
 
 # 8. Staleness guard now passes cleanly and leaves no temporary files:
-TMPDIR="$GUARD_TMP" bash "$GUARD" "$R" "$REMEDIATED_COMMIT" "$BASE_COMMIT"
+GITHUB_ACTIONS=true TMPDIR="$GUARD_TMP" bash "$GUARD" "$R" "$REMEDIATED_COMMIT" "$BASE_COMMIT"
 [ "$(find "$GUARD_TMP" -maxdepth 1 -name "staleness-guard.*" | wc -l)" -eq 0 ] || fail "expected no leftover guard roots in GUARD_TMP after clean pass"
 pass "end-to-end: staleness guard passes after roadmap update and leaves 0 temporary artifacts"
 
@@ -510,7 +510,7 @@ bash "$R/utils/roadmap-dashboard.sh" >/dev/null 2>&1 || true
 
 # THE PREMISE: the dashboard is byte-identical, which is exactly what makes this invisible to
 # drift detection and why the guard needs a signal rather than a comparison.
-if git diff --quiet -- ROADMAP-DASHBOARD.md; then
+if git diff --quiet -I '^<!-- releases-app generation:' -- ROADMAP-DASHBOARD.md; then
   pass "GH-474 e2e: a row added into an unrecognised section leaves the dashboard byte-identical"
 else
   fail "fixture premise wrong: the hidden row changed the dashboard, so drift detection would already catch it"

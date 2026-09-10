@@ -212,7 +212,7 @@ EOF
     if [ "$render_rc" -ne 0 ]; then
       cat >&2 <<EOF
 dashboard-staleness-guard: REFUSING the push — this range writes the roadmap ledger
-(releases.sql / releases.db), but the ledger cannot be rendered into a valid dashboard (GH-496).
+(releases.sql / releases.db) without regenerating ROADMAP-DASHBOARD.md, but the ledger cannot be rendered into a valid dashboard (GH-496).
 
 The renderer reported:
 $render_err
@@ -235,7 +235,7 @@ EOF_ERR
       cat >&2 <<EOF
 dashboard-staleness-guard: REFUSING the push — this range writes the roadmap ledger
 (releases.sql / releases.db) without modifying ROADMAP-DASHBOARD.md, but regenerating the
-dashboard produces NO diff (GH-243 / GH-257 / GH-474).
+dashboard produces NO diff (GH-243 / GH-257).
 
 The renderer dropped a roadmap row, so it contributes nothing to the view.
 It reported:

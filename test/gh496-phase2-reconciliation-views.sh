@@ -73,7 +73,8 @@ git -C "$REPO" remote add origin "https://github.com/HiQS-Labs/XYZ-forge.git"
 
 mkdir -p "$REPO/PROJECT/2-WORKING" "$REPO/PROJECT/3-COMPLETED" "$REPO/PROJECT/4-MISC" \
          "$REPO/utils/py" "$REPO/utils/pdda" "$REPO/utils/timeline" \
-         "$REPO/TESTS-RESULTS/2026-09-10+GH-999"
+         "$REPO/TESTS-RESULTS/2026-09-10+GH-999" "$REPO/.github/workflows"
+touch "$REPO/.github/workflows/wave-reconcile.yml"
 
 cp "$RECONCILE_PY" "$ROOT/utils/py/harness_paths.py" "$REPO/utils/py/"
 
@@ -270,8 +271,8 @@ git -C "$REPO" checkout -q development
 # Ensure valid active doc is back in 2-WORKING
 if [ -f "$REPO/PROJECT/3-COMPLETED/GH-999-TEST.md" ]; then
   mv "$REPO/PROJECT/3-COMPLETED/GH-999-TEST.md" "$REPO/PROJECT/2-WORKING/GH-999-TEST.md"
-  sed -i '' 's/status: Complete/status: Review/' "$REPO/PROJECT/2-WORKING/GH-999-TEST.md" 2>/dev/null || \
-  sed -i 's/status: Complete/status: Review/' "$REPO/PROJECT/2-WORKING/GH-999-TEST.md"
+  sed -i.bak 's/status: Complete/status: Review/' "$REPO/PROJECT/2-WORKING/GH-999-TEST.md"
+  rm -f "$REPO/PROJECT/2-WORKING/GH-999-TEST.md.bak"
   git -C "$REPO" add -A
   git -C "$REPO" commit -q -m "test: reset doc to 2-WORKING"
 fi

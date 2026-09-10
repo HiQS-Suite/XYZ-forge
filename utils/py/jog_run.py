@@ -247,17 +247,22 @@ def jog_regenerate_dashboard(root):
     dogfood items). Regenerate after promotion, before dispatch. Best-effort and scoped to
     installs that ship the renderer."""
     script = None
-    for candidate in (os.path.join(harness_home(), "utils", "roadmap-dashboard.sh"),
-                      os.path.join(root, "utils", "roadmap-dashboard.sh")):
+    for candidate in (os.path.join(root, "utils", "roadmap-dashboard.sh"),
+                      os.path.join(harness_home(), "utils", "roadmap-dashboard.sh")):
         if os.path.isfile(candidate):
             script = candidate
             break
     if not script:
         return
     try:
-        subprocess.run(["bash", script], cwd=root, capture_output=True, text=True, timeout=120)
-    except (OSError, subprocess.SubprocessError):
-        pass
+        env = dict(os.environ)
+        env["ROADMAP_DASHBOARD_ROOT"] = str(root)
+        r = subprocess.run(["bash", script], cwd=root, env=env, capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            print(f"jog: warning: roadmap-dashboard refresh failed ({r.returncode}): {(r.stderr or r.stdout).strip()}",
+                  file=sys.stderr)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"jog: warning: roadmap-dashboard refresh exception: {e}", file=sys.stderr)
 
 
 def jog_commit_supervisor_state(root, gh_num, exec_id):
@@ -1738,6 +1743,7 @@ def jog_run_main(args=None):
                     builder=args.builder, reviewer=args.reviewer,
                     auto_merge=getattr(args, "auto_merge", False))
                 jog_set_status(root, gh_num, action, failure_reason=reason)
+                jog_regenerate_dashboard(root)
                 if action == "completed":
                     tasks_processed += 1
                     continue

@@ -236,8 +236,8 @@ out="$(bash "$ROUTER" subsystems releases)"
   && pass "subsystems releases lists its 21 suites (GH-496)" \
   || fail "subsystems releases listed $(wc -w <<<"$out") suites: $out"
 out="$(bash "$ROUTER" subsystems pdda)"
-[[ "$(wc -w <<<"$out")" -eq 11 ]] \
-  && pass "subsystems pdda lists its 11 suites (GH-496)" \
+[[ "$(wc -w <<<"$out")" -eq 12 ]] \
+  && pass "subsystems pdda lists its 12 suites (GH-496)" \
   || fail "subsystems pdda listed $(wc -w <<<"$out") suites: $out"
 out="$(bash "$ROUTER" subsystems skills-army-hq)"
 [[ "$out" == "skills-army-hq.sh" ]] \

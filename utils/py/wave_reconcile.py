@@ -114,12 +114,16 @@ def check_hosted_reconciler_in_flight(repo_root, repo_slug=None, force=False):
         err = res.stderr.strip() or "unknown error"
         die(f"Hosted reconciler check failed: unable to query GitHub Actions ({err}). Pass --force-local-reconcile to bypass.", code=8)
 
-    try:
-        runs = json.loads(res.stdout)
-    except ValueError:
-        if force:
-            return
-        die("Hosted reconciler check failed: malformed JSON from gh run list. Pass --force-local-reconcile to bypass.", code=8)
+    stdout = res.stdout.strip()
+    if not stdout:
+        runs = []
+    else:
+        try:
+            runs = json.loads(stdout)
+        except ValueError:
+            if force:
+                return
+            die("Hosted reconciler check failed: malformed JSON from gh run list. Pass --force-local-reconcile to bypass.", code=8)
 
     in_flight = [
         r for r in runs
@@ -1522,8 +1526,10 @@ def main():
         check_current_branch(repo_root, skip_branch_check=args.skip_branch_check)
 
         repo_slug = github_slug_from_origin(repo_root)
+        has_workflow = os.path.isfile(os.path.join(repo_root, ".github", "workflows", "wave-reconcile.yml"))
         if not args.offline and not args.dry_run and os.environ.get("GITHUB_ACTIONS") != "true":
-            check_hosted_reconciler_in_flight(repo_root, repo_slug=repo_slug, force=args.force_local_reconcile)
+            if repo_slug and has_workflow:
+                check_hosted_reconciler_in_flight(repo_root, repo_slug=repo_slug, force=args.force_local_reconcile)
 
         if not args.skip_pull and not args.dry_run and not args.offline:
             pull_upstream(repo_root)
