@@ -32,6 +32,12 @@ echo "clean" > "$MOCK_GH_STATE"
 
 cat << EOF > "$MOCK_GH"
 #!/usr/bin/env bash
+STATE="\$(cat "$MOCK_GH_STATE" 2>/dev/null || echo "clean")"
+if [ "\$STATE" = "error" ]; then
+  echo "gh: network timeout connecting to api.github.com" >&2
+  exit 1
+fi
+
 if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
   pr_num="\$3"
   echo '{"number": 999, "title": "Test PR", "body": "closes #999", "state": "MERGED", "baseRefName": "development", "headRefOid": "0123456789abcdef0123456789abcdef01234567", "mergedAt": "2026-09-10T10:00:00Z", "mergeCommit": {"oid": "0123456789abcdef0123456789abcdef01234567"}}'
@@ -43,13 +49,9 @@ if [ "\$1" = "issue" ] && [ "\$2" = "view" ]; then
   exit 0
 fi
 
-STATE="\$(cat "$MOCK_GH_STATE" 2>/dev/null || echo "clean")"
 if [ "\$STATE" = "in_progress" ]; then
   echo '[{"databaseId": 998877, "status": "in_progress", "conclusion": null, "createdAt": "2026-09-10T10:00:00Z", "headSha": "abcdef1234", "event": "push"}]'
   exit 0
-elif [ "\$STATE" = "error" ]; then
-  echo "gh: network timeout connecting to api.github.com" >&2
-  exit 1
 elif [ "\$STATE" = "malformed" ]; then
   echo "not valid json"
   exit 0
@@ -385,7 +387,35 @@ echo '{"commit": "xyz", "rc": 0, "result": "pass"}' > "$REPO/TESTS-RESULTS/2026-
 # Receipt exists on disk as untracked file, but NOT committed in git tree at HEAD
 rc=0; out="$(python3 "$RECONCILE_PY" --root "$REPO" --pre-merge 2>&1)" || rc=$?
 assert_eq "Uncommitted test receipt does not satisfy check (exit 6)" "$rc" "6"
-rm -f "$REPO/TESTS-RESULTS/2026-09-10+GH-999/provenance.jsonl"
+rm -rf "$REPO/TESTS-RESULTS/2026-09-10+GH-999"
+
+# Case F: Red Control 5 - Stale test receipt rejected when code changes after test -> exit 6
+head_commit="$(git -C "$REPO" rev-parse HEAD)"
+mkdir -p "$REPO/TESTS-RESULTS/2026-09-10+GH-999"
+printf '{"commit": "%s", "rc": 0, "result": "pass"}\n' "$head_commit" > "$REPO/TESTS-RESULTS/2026-09-10+GH-999/provenance.jsonl"
+git -C "$REPO" add "$REPO/TESTS-RESULTS/2026-09-10+GH-999/provenance.jsonl"
+git -C "$REPO" commit -q -m "test: commit receipt for previous commit"
+# Now make a code change without re-running tests
+echo "# code modification" >> "$REPO/PROJECT/2-WORKING/GH-999-TEST.md"
+git -C "$REPO" commit -q -am "fix: code change after receipt was generated"
+rc=0; out="$(python3 "$RECONCILE_PY" --root "$REPO" --pre-merge 2>&1)" || rc=$?
+assert_eq "Stale test receipt with code changes is rejected (exit 6)" "$rc" "6"
+if grep -q "No committed passing test receipt at HEAD matches" <<< "$out"; then
+  pass "Error confirms stale receipt rejected"
+else
+  fail "Error missing stale receipt explanation: $out"
+fi
+
+# Case G: Red Control 6 - Pre-merge fails closed when PR metadata cannot be fetched -> exit 2
+echo "error" > "$MOCK_GH_STATE"
+rc=0; out="$(python3 "$RECONCILE_PY" --root "$REPO" --pre-merge --pr 999 2>&1)" || rc=$?
+assert_eq "Pre-merge fails closed when PR metadata cannot be fetched (exit 2)" "$rc" "2"
+if grep -q "Failed to query PR #999 via gh pr view" <<< "$out"; then
+  pass "Error message explains PR query failure"
+else
+  fail "Error missing PR query failure explanation: $out"
+fi
+echo "clean" > "$MOCK_GH_STATE"
 
 # -------------------------------------------------------------
 # Part 3: Marathon Plan Fingerprinting
@@ -427,5 +457,12 @@ rc=0; out="$(python3 "$RECONCILE_PY" --root "$REPO" --marathon test-wave --allow
 assert_eq "Third run exits 0 after roadmap mutation" "$rc" "0"
 calls_run3="$(wc -l < "$REPO/planner_calls.log" | tr -d ' ')"
 assert_eq "Marathon planner re-executed when roadmap inputs modified" "$calls_run3" "2"
+
+# 4th run: Mutate active working document contents -> fingerprint changes -> marathon-plan.sh must run!
+echo "Updated requirement content in active doc" >> "$REPO/PROJECT/2-WORKING/GH-999-TEST.md"
+rc=0; out="$(python3 "$RECONCILE_PY" --root "$REPO" --marathon test-wave --allow-dirty --skip-branch-check --offline "$REPO/manifest.json" 2>&1)" || rc=$?
+assert_eq "Fourth run exits 0 after active doc content mutation" "$rc" "0"
+calls_run4="$(wc -l < "$REPO/planner_calls.log" | tr -d ' ')"
+assert_eq "Marathon planner re-executed when active doc contents modified" "$calls_run4" "3"
 
 echo "=== All GH-496 Phase 2 tests passed successfully! ==="

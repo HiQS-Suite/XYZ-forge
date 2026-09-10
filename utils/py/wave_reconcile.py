@@ -521,24 +521,62 @@ def validate_pre_merge_receipts(repo_root, head_sha, pr_num=None):
                     continue
                 c_val = str(entry.get("commit") or "").lower()
                 c_len = len(c_val)
-                commit_match = bool(
-                    c_val
-                    and (
-                        (c_len >= 7 and head_sha.lower().startswith(c_val))
-                        or c_val == head_sha.lower()
-                        or (c_len >= 7 and any(s.startswith(c_val) for s in recent_shas_lower))
-                        or any(s == c_val for s in recent_shas_lower)
-                    )
-                )
+                matched_sha = None
+                commit_match = False
+                if c_val and c_len >= 7:
+                    try:
+                        resolved = subprocess.check_output(
+                            ["git", "rev-parse", "--verify", f"{c_val}^{{commit}}"],
+                            cwd=repo_root,
+                            text=True,
+                            stderr=subprocess.DEVNULL,
+                        ).strip().lower()
+                        if resolved == head_sha.lower() or resolved in recent_shas_lower:
+                            commit_match = True
+                            matched_sha = resolved
+                    except Exception:
+                        pass
+
                 pr_match = False
                 if expected_pr:
                     pr_val = str(entry.get("pr") or entry.get("pr_number") or "")
                     if pr_val == expected_pr:
                         pr_match = True
+                        if not matched_sha and c_val and c_len >= 7:
+                            try:
+                                matched_sha = subprocess.check_output(
+                                    ["git", "rev-parse", "--verify", f"{c_val}^{{commit}}"],
+                                    cwd=repo_root,
+                                    text=True,
+                                    stderr=subprocess.DEVNULL,
+                                ).strip().lower()
+                            except Exception:
+                                pass
+
                 if commit_match or pr_match:
                     res = entry.get("result") or entry.get("status")
                     rc = entry.get("rc")
                     if res in ("pass", "passed", "PASS") or rc == 0:
+                        # GH-496 / Codex QA: verify receipt is not stale.
+                        # If matched_sha is not HEAD, verify that no code or docs outside
+                        # TESTS-RESULTS/ changed between the tested commit and HEAD.
+                        if matched_sha and matched_sha != head_sha.lower():
+                            try:
+                                diff_out = subprocess.check_output(
+                                    ["git", "diff", "--name-only", f"{matched_sha}..{head_sha}"],
+                                    cwd=repo_root,
+                                    text=True,
+                                    stderr=subprocess.DEVNULL,
+                                ).splitlines()
+                                code_modifications = [
+                                    f for f in diff_out
+                                    if not f.startswith("TESTS-RESULTS/")
+                                ]
+                                if code_modifications:
+                                    # Stale receipt: code changed after this qualification run!
+                                    continue
+                            except Exception:
+                                continue
                         found_match = True
                         break
             if found_match:
@@ -1172,6 +1210,12 @@ def compute_marathon_planner_fingerprint(repo_root):
         for fname in sorted(os.listdir(working_dir)):
             if fname.endswith(".md") and not fname.startswith("MARATHON-PLAN-"):
                 h.update(fname.encode("utf-8"))
+                fpath = os.path.join(working_dir, fname)
+                try:
+                    with open(fpath, "rb") as f:
+                        h.update(f.read())
+                except Exception:
+                    pass
 
     planner_src = harness_tool(repo_root, "utils/py/marathon_plan.py")
     if os.path.isfile(planner_src):
@@ -1340,8 +1384,13 @@ def run_pre_merge(repo_root, args):
                 pr_title = data.get("title", "")
                 pr_body = data.get("body", "")
                 head_sha = data.get("headRefOid") or head_sha
-        except Exception:
-            pass
+            elif not args.offline:
+                die(f"Failed to query PR #{pr_num} via gh pr view (exit {r.returncode}): {r.stderr.strip()}", code=2)
+        except ReconcileError:
+            raise
+        except Exception as e:
+            if not args.offline:
+                die(f"Cannot query PR #{pr_num} metadata: {e}", code=2)
 
     if not pr_title and not pr_body:
         try:
@@ -1362,10 +1411,23 @@ def run_pre_merge(repo_root, args):
 
     diff_docs = []
     try:
+        base_ref = "origin/development"
+        try:
+            mb = subprocess.check_output(
+                ["git", "merge-base", "HEAD", base_ref],
+                cwd=repo_root,
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+            diff_range = f"{mb}..HEAD" if mb else "HEAD~1..HEAD"
+        except Exception:
+            diff_range = "HEAD~1..HEAD"
+
         diff_status = subprocess.check_output(
-            ["git", "diff", "--name-status", "HEAD~1..HEAD"],
+            ["git", "diff", "--name-status", diff_range],
             cwd=repo_root,
             text=True,
+            stderr=subprocess.DEVNULL,
         ).splitlines()
         for dline in diff_status:
             parts = dline.split()
@@ -1519,7 +1581,10 @@ def main():
     repo_root = os.path.abspath(args.root) if args.root else resolve_repo_root()
 
     if args.pre_merge:
-        run_pre_merge(repo_root, args)
+        try:
+            run_pre_merge(repo_root, args)
+        except ReconcileError as re_err:
+            sys.exit(re_err.code)
         return
 
     lock_file = os.path.join(repo_root, ".git", "wave-reconcile.lock")

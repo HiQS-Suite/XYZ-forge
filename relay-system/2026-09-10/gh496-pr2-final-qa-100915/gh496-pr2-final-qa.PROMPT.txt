@@ -1,0 +1,20 @@
+Please perform a final QA review of GH-496 PR 2 (Phase 2: Single Reconciliation Owner, View Decoupling & Pre-Merge Closeout Checks).
+
+Review the diff between development and HEAD:
+1. Single reconciliation owner:
+   - Hosted wave-reconcile.yml is primary landing writer.
+   - Local wave_reconcile.py fails closed (exit 8) if hosted run is in flight.
+   - --force-local-reconcile overrides locally, but is hard-rejected inside GITHUB_ACTIONS=true (exit 2).
+2. View decoupling & generation stamping:
+   - ROADMAP-DASHBOARD.md line 1 embeds <!-- releases-app generation: <N> -->.
+   - dashboard-staleness-guard allows view commits only if renderers change or inside GITHUB_ACTIONS=true.
+   - Routine task branches do not commit view files.
+3. Pre-merge closeout checks:
+   - wave_reconcile.py --pre-merge verifies frontmatter (owner, status), substantive Lessons Learned (exit 5), and committed test receipts in Git tree at HEAD (exit 6).
+4. Marathon plan fingerprinting:
+   - Skips redundant marathon-plan.sh when canonical inputs match .tick/marathon-plan.fingerprint.
+   - Generated MARATHON-PLAN-*.md excluded from input hash.
+   - .tick/marathon-plan.fingerprint tracked in RollbackJournal so it rolls back cleanly on error.
+5. Zero SQLite binary untracking: Strictly reserved for PR 3.
+
+Are there any remaining bugs, edge cases, or regressions? Is the PR ready to merge?
